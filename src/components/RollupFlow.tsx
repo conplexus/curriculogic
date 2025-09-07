@@ -27,6 +27,14 @@ const NODE_H = 132;
 const RANKSEP = 120;
 const NODESEP = 48;
 
+const typeRank: Record<string, number> = {
+  standard: 0,
+  course: 1,
+  objective: 2,
+  assessment: 3,
+  question: 4,
+};
+
 const statusStroke: Record<Status, string> = {
   GREEN: "#22c55e",
   AMBER: "#f59e0b",
@@ -82,9 +90,19 @@ function layout(nodes: RFNode[], edges: RFEdge[]) {
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "LR", nodesep: NODESEP, ranksep: RANKSEP });
   g.setDefaultEdgeLabel(() => ({}));
-  nodes.forEach((n) => g.setNode(n.id, { width: NODE_W, height: NODE_H }));
+
+  nodes.forEach((n) => {
+    const type = (n.data?.type || n.type) as string;
+    g.setNode(n.id, {
+      width: NODE_W,
+      height: NODE_H,
+      rank: typeRank[type] ?? 99, // put unknowns at far right
+    });
+  });
+
   edges.forEach((e) => g.setEdge(e.source, e.target));
   dagre.layout(g);
+
   return nodes.map((n) => {
     const pos = g.node(n.id);
     n.position = { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 };
@@ -203,7 +221,7 @@ function RollupFlowInner({
     const mappedNodes: RFNode[] = nodes.map((n) => ({
       id: n.id,
       type: n.type === "group" ? "group" : "card",
-      data: { label: n.label, status: n.status },
+      data: { label: n.label, status: n.status, type: n.type },
       position: { x: 0, y: 0 },
       draggable: n.type !== "group",
       selectable: true,
@@ -250,13 +268,6 @@ function RollupFlowInner({
       }
     })();
   }, [toRF, setRfNodes, setRfEdges, fitView]);
-
-  // Re-fit on substantial node changes
-  useEffect(() => {
-    if (!rfNodes.length) return;
-    const id = setTimeout(() => fitView({ padding: 0.2, duration: 250 }), 0);
-    return () => clearTimeout(id);
-  }, [rfNodes, fitView]);
 
   // Selection + hover spotlight & edge opacity
   useEffect(() => {
@@ -427,11 +438,12 @@ function RollupFlowInner({
           onClear?.();
         }}
         // --- UX: pan on wheel, pinch to zoom
-        fitView
+        defaultViewport={{ x: 0, y: 0, zoom: 1 }}
         fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.55}
+        minZoom={0.2}
         maxZoom={1.9}
         panOnScroll
+        panOnScrollMode="free"
         zoomOnScroll={false}
         zoomOnPinch
         panOnDrag

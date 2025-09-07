@@ -6,7 +6,6 @@ import ReactFlow, {
   Position,
   Background,
   Controls,
-  // MiniMap,
   useNodesState,
   useEdgesState,
   type Node as RFNode,
@@ -20,6 +19,7 @@ import "reactflow/dist/style.css";
 import dagre from "dagre";
 import { getRollup } from "@/lib/api";
 import type { RollupNode, RollupEdge, Status } from "@/lib/types";
+import InsightsDrawer from "./InsightsDrawer";
 
 // ---- Readability & spacing
 const NODE_W = 320;
@@ -96,7 +96,7 @@ function layout(nodes: RFNode[], edges: RFEdge[]) {
     g.setNode(n.id, {
       width: NODE_W,
       height: NODE_H,
-      rank: typeRank[type] ?? 99, // put unknowns at far right
+      rank: typeRank[type] ?? 99,
     });
   });
 
@@ -123,9 +123,9 @@ function fuzzyScore(query: string, text: string): number {
 
   for (let i = 0; i < s.length && qi < q.length; i++) {
     if (s[i] === q[qi]) {
-      let bonus = 1; // base
-      if (i === 0 || /\W|_|\s/.test(s[i - 1])) bonus += 3; // word/start bonus
-      if (streak > 0) bonus += 2; // contiguous bonus
+      let bonus = 1;
+      if (i === 0 || /\W|_|\s/.test(s[i - 1])) bonus += 3;
+      if (streak > 0) bonus += 2;
       streak++;
       qi++;
       score += bonus;
@@ -134,13 +134,12 @@ function fuzzyScore(query: string, text: string): number {
     }
   }
 
-  if (qi < q.length) return 0; // not all query chars matched (in order)
-  // prefer tighter/shorter matches slightly
+  if (qi < q.length) return 0;
   score += Math.max(0, 4 - (s.length - q.length));
   return score;
 }
 
-// ---------- Public wrapper (provides the store)
+// ---------- Public wrapper
 export default function RollupFlow(props: Props) {
   return (
     <ReactFlowProvider>
@@ -149,7 +148,7 @@ export default function RollupFlow(props: Props) {
   );
 }
 
-// ---------- Inner component (safe to use hooks)
+// ---------- Inner component
 function RollupFlowInner({
   selectedId = null,
   onSelect,
@@ -161,15 +160,40 @@ function RollupFlowInner({
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<RFNode>([]);
   const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState<RFEdge[]>([]);
   const rf = useReactFlow();
-  const { fitView, setViewport, zoomIn, zoomOut } = rf;
+  const { fitView, setViewport, zoomIn, zoomOut, getViewport } = rf;
 
   // Hover spotlight
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
-  // ------- Search & Jump
+  // Branch focus (IDs to keep visible; null = show all)
+  const [focusedIds, setFocusedIds] = useState<Set<string> | null>(null);
+
+  // Search
   const [q, setQ] = useState("");
   const [hitIndex, setHitIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // ----- URL params (SSR-safe)
+  const urlParams = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    return new URLSearchParams(window.location.search);
+  }, []);
+
+  const initialViewport = useMemo(() => {
+    if (!urlParams) return { x: 0, y: 0, zoom: 1 };
+    return {
+      x: Number(urlParams.get("x") ?? 0),
+      y: Number(urlParams.get("y") ?? 0),
+      zoom: Number(urlParams.get("z") ?? 1),
+    };
+  }, [urlParams]);
+
+  const initialSelected = useMemo(
+    () => urlParams?.get("sel") ?? null,
+    [urlParams]
+  );
+
+  const proOptions = useMemo(() => ({ hideAttribution: true }), []);
 
   const hits = useMemo(() => {
     const s = q.trim();
@@ -181,10 +205,10 @@ function RollupFlowInner({
       }))
       .filter((h) => h.score > 0)
       .sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score; // higher first
+        if (b.score !== a.score) return b.score - a.score;
         const al = String(a.node.data?.label || "").length;
         const bl = String(b.node.data?.label || "").length;
-        return al - bl; // tie-break: shorter label first
+        return al - bl;
       });
     return scored.map((h) => h.node);
   }, [q, rfNodes]);
@@ -194,11 +218,22 @@ function RollupFlowInner({
     [fitView]
   );
 
+  const writeSelToUrl = useCallback((id: string | null) => {
+    if (typeof window === "undefined") return;
+    const qs = new URLSearchParams(window.location.search);
+    if (id) qs.set("sel", id);
+    else qs.delete("sel");
+    window.history.replaceState(null, "", `?${qs.toString()}`);
+  }, []);
+
   const jumpToActive = useCallback(() => {
     if (!hits.length) return;
     const id = hits[Math.max(0, Math.min(hitIndex, hits.length - 1))].id;
     centerOnId(id);
-  }, [hits, hitIndex, centerOnId]);
+    writeSelToUrl(id);
+    const found = rawNodes.find((n) => n.id === id);
+    if (found) onSelect?.(id, found);
+  }, [hits, hitIndex, centerOnId, writeSelToUrl, onSelect, rawNodes]);
 
   const jumpNext = useCallback(() => {
     if (!hits.length) return;
@@ -210,13 +245,13 @@ function RollupFlowInner({
     setHitIndex((i) => (i - 1 + hits.length) % hits.length);
   }, [hits.length]);
 
-  // Keep latest onGraphChange without making it an effect dependency
+  // Keep latest onGraphChange
   const onGraphChangeRef = useRef(onGraphChange);
   useEffect(() => {
     onGraphChangeRef.current = onGraphChange;
   }, [onGraphChange]);
 
-  // Stable mapper
+  // Map raw to RF
   const toRF = useCallback((nodes: RollupNode[], edges: RollupEdge[]) => {
     const mappedNodes: RFNode[] = nodes.map((n) => ({
       id: n.id,
@@ -233,14 +268,14 @@ function RollupFlowInner({
       target: e.target,
       type: "smoothstep",
       markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18 },
-      style: { strokeWidth: 2.5, opacity: 0.9, stroke: "#94a3b8" }, // slate-400
-      interactionWidth: 24, // easier to hover/click
+      style: { strokeWidth: 2.5, opacity: 0.9, stroke: "#94a3b8" },
+      interactionWidth: 24,
     }));
 
     return { rfNodes: mappedNodes, rfEdges: mappedEdges };
   }, []);
 
-  // Run-once fetch
+  // Fetch once
   const fetchedRef = useRef(false);
   useEffect(() => {
     if (fetchedRef.current) return;
@@ -261,13 +296,29 @@ function RollupFlowInner({
         setRfNodes(laidOut);
         setRfEdges(mappedEdges);
 
-        // initial fit after layout
         setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 0);
+
+        setTimeout(() => {
+          setViewport?.(initialViewport, { duration: 0 });
+          if (initialSelected) {
+            const found = nodes.find((n) => n.id === initialSelected);
+            if (found) onSelect?.(initialSelected, found);
+          }
+        }, 0);
       } catch (err) {
         console.error("GET /rollup failed", err);
       }
     })();
-  }, [toRF, setRfNodes, setRfEdges, fitView]);
+  }, [
+    toRF,
+    setRfNodes,
+    setRfEdges,
+    fitView,
+    setViewport,
+    initialViewport,
+    initialSelected,
+    onSelect,
+  ]);
 
   // Selection + hover spotlight & edge opacity
   useEffect(() => {
@@ -292,7 +343,7 @@ function RollupFlowInner({
     );
   }, [selectedId, hoveredId, setRfEdges, setRfNodes]);
 
-  // When searching, spotlight the active hit
+  // Search spotlight
   useEffect(() => {
     if (q && hits.length) {
       setHoveredId(hits[Math.max(0, Math.min(hitIndex, hits.length - 1))].id);
@@ -301,14 +352,13 @@ function RollupFlowInner({
     }
   }, [q, hits, hitIndex]);
 
-  // Keyboard shortcuts: f/+/- and search focus
+  // Keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e as any).isComposing)
         return;
 
-      // Focus search: "/" or Ctrl/Cmd+K
       if (
         e.key === "/" ||
         ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k")
@@ -326,9 +376,12 @@ function RollupFlowInner({
     return () => window.removeEventListener("keydown", onKey);
   }, [fitView, zoomIn, zoomOut]);
 
-  // Persist viewport
+  // Persist viewport locally
   useEffect(() => {
-    const saved = localStorage.getItem("rollupViewport");
+    const saved =
+      typeof window !== "undefined"
+        ? localStorage.getItem("rollupViewport")
+        : null;
     if (saved) {
       try {
         setViewport?.(JSON.parse(saved));
@@ -344,7 +397,118 @@ function RollupFlowInner({
     },
   });
 
-  const proOptions = useMemo(() => ({ hideAttribution: true }), []);
+  // URL writers
+  const handleMoveEnd = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const vp = getViewport();
+    const qs = new URLSearchParams(window.location.search);
+    qs.set("x", String(Math.round(vp.x)));
+    qs.set("y", String(Math.round(vp.y)));
+    qs.set("z", vp.zoom.toFixed(2));
+    window.history.replaceState(null, "", `?${qs.toString()}`);
+  }, [getViewport]);
+
+  const handleSelectionChange = useCallback((params: { nodes: RFNode[] }) => {
+    if (typeof window === "undefined") return;
+    const qs = new URLSearchParams(window.location.search);
+    if (params.nodes[0]) qs.set("sel", params.nodes[0].id);
+    else qs.delete("sel");
+    window.history.replaceState(null, "", `?${qs.toString()}`);
+  }, []);
+
+  // ----- Branch focus helpers
+  const computeBranchIds = useCallback(
+    (centerId: string) => {
+      const parentsMap = new Map<string, string[]>();
+      const childrenMap = new Map<string, string[]>();
+      for (const e of rawEdges) {
+        if (!childrenMap.has(e.source)) childrenMap.set(e.source, []);
+        if (!parentsMap.has(e.target)) parentsMap.set(e.target, []);
+        childrenMap.get(e.source)!.push(e.target);
+        parentsMap.get(e.target)!.push(e.source);
+      }
+
+      const seen = new Set<string>();
+      const stack = [centerId];
+      // Upward
+      const pushParents = (id: string) => {
+        for (const p of parentsMap.get(id) || [])
+          if (!seen.has(p)) {
+            seen.add(p);
+            pushParents(p);
+          }
+      };
+      // Downward
+      const pushChildren = (id: string) => {
+        for (const c of childrenMap.get(id) || [])
+          if (!seen.has(c)) {
+            seen.add(c);
+            pushChildren(c);
+          }
+      };
+
+      seen.add(centerId);
+      pushParents(centerId);
+      pushChildren(centerId);
+      return seen;
+    },
+    [rawEdges]
+  );
+
+  const handleFocusBranch = useCallback(
+    (id: string) => {
+      const setIds = computeBranchIds(id);
+      setFocusedIds(setIds);
+    },
+    [computeBranchIds]
+  );
+
+  const handleExitFocus = useCallback(() => setFocusedIds(null), []);
+
+  // Apply hidden flags based on focus set
+  useEffect(() => {
+    if (!focusedIds) {
+      setRfNodes((nds) => nds.map((n) => ({ ...n, hidden: false })));
+      setRfEdges((eds) => eds.map((e) => ({ ...e, hidden: false })));
+      return;
+    }
+    setRfNodes((nds) =>
+      nds.map((n) => ({ ...n, hidden: !focusedIds.has(n.id) }))
+    );
+    setRfEdges((eds) =>
+      eds.map((e) => ({
+        ...e,
+        hidden: !(focusedIds.has(e.source) && focusedIds.has(e.target)),
+      }))
+    );
+  }, [focusedIds, setRfNodes, setRfEdges]);
+
+  // Drawer handlers
+  const handleCopyLink = useCallback((id: string) => {
+    if (typeof window === "undefined") return;
+    const qs = new URLSearchParams(window.location.search);
+    qs.set("sel", id);
+    const url = `${window.location.pathname}?${qs.toString()}`;
+    navigator.clipboard?.writeText(url).catch(() => {});
+  }, []);
+
+  const handleJumpTo = useCallback(
+    (id: string) => {
+      const found = rawNodes.find((n) => n.id === id);
+      if (found) {
+        onSelect?.(id, found);
+        writeSelToUrl(id);
+        centerOnId(id);
+      }
+    },
+    [rawNodes, onSelect, writeSelToUrl, centerOnId]
+  );
+
+  const selectedNode = useMemo(
+    () =>
+      selectedId ? rawNodes.find((n) => n.id === selectedId) ?? null : null,
+    [selectedId, rawNodes]
+  );
 
   return (
     <div className="relative h-[70vh] rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-800">
@@ -359,11 +523,7 @@ function RollupFlowInner({
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
-              if (e.shiftKey) {
-                jumpPrev();
-              } else {
-                jumpToActive();
-              }
+              e.shiftKey ? jumpPrev() : jumpToActive();
             }
             if (e.key === "Escape") {
               setQ("");
@@ -418,7 +578,33 @@ function RollupFlowInner({
         )}
       </div>
 
+      {/* Reset View */}
+      <button
+        onClick={() => fitView({ padding: 0.2, duration: 250 })}
+        className="absolute top-3 right-16 z-50 rounded-md border bg-white/90 px-2 py-1 text-xs shadow hover:shadow-md"
+        title="Fit (F)"
+      >
+        Reset View
+      </button>
+
+      {/* Insights Drawer */}
+      <InsightsDrawer
+        node={selectedNode}
+        nodes={rawNodes}
+        edges={rawEdges}
+        isFocused={!!focusedIds}
+        onClose={() => {
+          onClear?.();
+        }}
+        onFocusBranch={handleFocusBranch}
+        onExitFocus={handleExitFocus}
+        onCopyLink={handleCopyLink}
+        onJumpTo={handleJumpTo}
+      />
+
       <ReactFlow
+        onMoveEnd={handleMoveEnd}
+        onSelectionChange={handleSelectionChange}
         nodeTypes={NODE_TYPES}
         nodes={rfNodes}
         edges={rfEdges}
@@ -428,6 +614,9 @@ function RollupFlowInner({
           const found = rawNodes.find((n) => n.id === node.id);
           if (found) {
             onSelect?.(node.id, found);
+            const qs = new URLSearchParams(window.location.search);
+            qs.set("sel", node.id);
+            window.history.replaceState(null, "", `?${qs.toString()}`);
             fitView({ nodes: [{ id: node.id }], padding: 0.2, duration: 350 });
           }
         }}
@@ -436,12 +625,18 @@ function RollupFlowInner({
         onPaneClick={() => {
           setHoveredId(null);
           onClear?.();
+          const qs = new URLSearchParams(window.location.search);
+          qs.delete("sel");
+          window.history.replaceState(null, "", `?${qs.toString()}`);
         }}
-        // --- UX: pan on wheel, pinch to zoom
         defaultViewport={{ x: 0, y: 0, zoom: 1 }}
         fitViewOptions={{ padding: 0.2 }}
         minZoom={0.2}
-        maxZoom={1.9}
+        maxZoom={2.5}
+        translateExtent={[
+          [-50000, -50000],
+          [50000, 50000],
+        ]}
         panOnScroll
         panOnScrollMode="free"
         zoomOnScroll={false}
@@ -462,9 +657,7 @@ function RollupFlowInner({
           size={1}
           color="rgba(255, 255, 255, 0.08)"
         />
-
         <Controls position="top-right" showInteractive={false} />
-        {/* <MiniMap pannable zoomable /> */}
       </ReactFlow>
     </div>
   );

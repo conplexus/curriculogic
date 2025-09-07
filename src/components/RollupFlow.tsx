@@ -16,16 +16,26 @@ import ReactFlow, {
   MarkerType,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import dagre from "dagre";
+import dagre from "dagre"; // fallback only
 import { getRollup } from "@/lib/api";
 import type { RollupNode, RollupEdge, Status } from "@/lib/types";
 import InsightsDrawer from "./InsightsDrawer";
+import StatusFilter from "./StatusFilter";
 
-// ---- Readability & spacing
+// ---- Layout constants
 const NODE_W = 320;
 const NODE_H = 132;
 const RANKSEP = 120;
 const NODESEP = 48;
+
+// Gentle focus tuning
+const FOCUS_PADDING = 1; // higher padding = gentler zoom
+const FOCUS_DURATION = 160;
+
+// Fade levels
+const DIM_NODE_OPACITY = 0.22;
+const BASE_EDGE_OPACITY = 0.9;
+const DIM_EDGE_OPACITY = 0.12;
 
 const typeRank: Record<string, number> = {
   standard: 0,
@@ -34,7 +44,6 @@ const typeRank: Record<string, number> = {
   assessment: 3,
   question: 4,
 };
-
 const statusStroke: Record<Status, string> = {
   GREEN: "#22c55e",
   AMBER: "#f59e0b",
@@ -49,94 +58,32 @@ type Props = {
   onGraphChange?: (nodes: RollupNode[], edges: RollupEdge[]) => void;
 };
 
-function CardNode({ data, selected }: any) {
-  const border = statusStroke[data.status as Status] ?? "#9ca3af";
-  return (
-    <div
-      className={[
-        "relative rounded-2xl border-2 bg-white shadow-sm",
-        "px-4 py-3 transition-all cursor-pointer",
-        selected ? "ring-2 ring-blue-400 shadow-lg" : "hover:shadow-md",
-      ].join(" ")}
-      style={{ borderColor: border }}
-      title={data.label}
-    >
-      {/* status accent bar */}
-      <div
-        className="absolute left-0 top-0 h-full w-1.5 rounded-l-2xl"
-        style={{ backgroundColor: border }}
-      />
-      <div className="text-[14px] font-semibold leading-5 text-gray-900">
-        {data.label}
-      </div>
-      <Handle type="target" position={Position.Left} />
-      <Handle type="source" position={Position.Right} />
-      <div className="mt-0.5 text-[12px] text-gray-600">{data.status}</div>
-    </div>
-  );
-}
-
-function GroupNode({ data }: any) {
-  return (
-    <div className="rounded-2xl border-2 bg-gray-50 px-4 py-3 shadow-inner">
-      <div className="text-[13.5px] font-bold text-gray-800">{data.label}</div>
-    </div>
-  );
-}
-
-const NODE_TYPES = { card: CardNode, group: GroupNode } as const;
-
-function layout(nodes: RFNode[], edges: RFEdge[]) {
+// ---------- Workerized layout helpers
+function layoutSync(nodes: RFNode[], edges: RFEdge[]) {
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "LR", nodesep: NODESEP, ranksep: RANKSEP });
   g.setDefaultEdgeLabel(() => ({}));
-
-  nodes.forEach((n) => {
+  for (const n of nodes) {
     const type = (n.data?.type || n.type) as string;
     g.setNode(n.id, {
       width: NODE_W,
       height: NODE_H,
       rank: typeRank[type] ?? 99,
     });
-  });
-
-  edges.forEach((e) => g.setEdge(e.source, e.target));
+  }
+  for (const e of edges) g.setEdge(e.source, e.target);
   dagre.layout(g);
-
   return nodes.map((n) => {
-    const pos = g.node(n.id);
-    n.position = { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 };
-    n.style = { width: NODE_W, height: NODE_H };
+    const p = g.node(n.id);
+    n.position = { x: p.x - NODE_W / 2, y: p.y - NODE_H / 2 };
+    n.style = { ...(n.style || {}), width: NODE_W, height: NODE_H };
     return n;
   });
 }
-
-// Simple, fast fuzzy scorer (subsequence with bonuses)
-function fuzzyScore(query: string, text: string): number {
-  if (!query) return 0;
-  const q = query.toLowerCase().trim();
-  const s = text.toLowerCase();
-
-  let qi = 0;
-  let score = 0;
-  let streak = 0;
-
-  for (let i = 0; i < s.length && qi < q.length; i++) {
-    if (s[i] === q[qi]) {
-      let bonus = 1;
-      if (i === 0 || /\W|_|\s/.test(s[i - 1])) bonus += 3;
-      if (streak > 0) bonus += 2;
-      streak++;
-      qi++;
-      score += bonus;
-    } else {
-      streak = 0;
-    }
-  }
-
-  if (qi < q.length) return 0;
-  score += Math.max(0, 4 - (s.length - q.length));
-  return score;
+function djb2(str: string) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h) ^ str.charCodeAt(i);
+  return String(h >>> 0);
 }
 
 // ---------- Public wrapper
@@ -162,23 +109,184 @@ function RollupFlowInner({
   const rf = useReactFlow();
   const { fitView, setViewport, zoomIn, zoomOut, getViewport } = rf;
 
+  // Worker + cache
+  const workerRef = useRef<Worker | null>(null);
+  const layoutCache = useRef<
+    Map<string, Record<string, { x: number; y: number }>>
+  >(new Map());
+
+  // Layout edit mode (locked by default)
+  const [editMode, setEditMode] = useState(false);
+
+  // Drag tracking (so selection-change doesn’t open drawer)
+  const isDraggingRef = useRef(false);
+
+  // Avoid re-centering same selection repeatedly
+  const lastCenteredIdRef = useRef<string | null>(null);
+
+  // Toast
+  const [toast, setToast] = useState<string | null>(null);
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 1200);
+  }, []);
+
+  const layoutKey = useMemo(() => {
+    if (!rawNodes.length) return null;
+    return djb2(
+      rawNodes
+        .map((n) => n.id)
+        .sort()
+        .join("|") +
+        "::" +
+        rawEdges
+          .map((e) => `${e.source}->${e.target}`)
+          .sort()
+          .join("|")
+    );
+  }, [rawNodes, rawEdges]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // @ts-ignore - Next packs this with webpack/turbopack
+    workerRef.current = new Worker(
+      new URL("../workers/layoutWorker.ts", import.meta.url),
+      { type: "module" }
+    );
+    return () => workerRef.current?.terminate();
+  }, []);
+
+  useEffect(() => {
+    if (!layoutKey) return;
+    const raw = localStorage.getItem(`layout:${layoutKey}`);
+    if (!raw) return;
+    try {
+      const saved: Record<string, { x: number; y: number }> = JSON.parse(raw);
+      setRfNodes((nds) =>
+        nds.map((n) => ({ ...n, position: saved[n.id] ?? n.position }))
+      );
+    } catch {}
+  }, [layoutKey, setRfNodes]);
+
+  // ---- runLayout (OFF main thread, cached)
+  const runLayout = useCallback(
+    async (nodes: RFNode[], edges: RFEdge[]) => {
+      const key = djb2(
+        nodes
+          .map((n) => n.id)
+          .sort()
+          .join("|") +
+          "::" +
+          edges
+            .map((e) => `${e.source}->${e.target}`)
+            .sort()
+            .join("|")
+      );
+
+      const apply = (positions: Record<string, { x: number; y: number }>) => {
+        setRfNodes((prev) =>
+          prev.map((n) => ({
+            ...n,
+            position: positions[n.id] ?? n.position,
+            style: { ...(n.style || {}), width: NODE_W, height: NODE_H },
+          }))
+        );
+      };
+
+      // cache hit
+      const cached = layoutCache.current.get(key);
+      if (cached) {
+        apply(cached);
+        return;
+      }
+
+      if (!workerRef.current) {
+        // fallback sync
+        const laidOut = layoutSync([...nodes], edges);
+        setRfNodes(laidOut);
+        return;
+      }
+
+      const positions = await new Promise<
+        Record<string, { x: number; y: number }>
+      >((resolve) => {
+        const onMsg = (
+          e: MessageEvent<{
+            positions: Record<string, { x: number; y: number }>;
+          }>
+        ) => {
+          workerRef.current?.removeEventListener("message", onMsg as any);
+          resolve(e.data.positions);
+        };
+        workerRef.current!.addEventListener("message", onMsg as any);
+        workerRef.current!.postMessage({
+          nodes: nodes.map((n) => ({
+            id: n.id,
+            width: NODE_W,
+            height: NODE_H,
+            rank: typeRank[(n.data?.type || n.type) as string] ?? 99,
+          })),
+          edges: edges.map((e) => ({ source: e.source, target: e.target })),
+          options: { rankdir: "LR", nodesep: NODESEP, ranksep: RANKSEP },
+        });
+      });
+
+      layoutCache.current.set(key, positions);
+      apply(positions);
+    },
+    [setRfNodes]
+  );
+
+  // ---- Save / Reset (top-level hooks, depend on runLayout)
+  const saveLayout = useCallback(() => {
+    if (!layoutKey) return;
+    const posMap = Object.fromEntries(
+      rf.getNodes().map((n) => [n.id, n.position])
+    );
+    localStorage.setItem(`layout:${layoutKey}`, JSON.stringify(posMap));
+    showToast("Layout saved");
+  }, [layoutKey, rf, showToast]);
+
+  const resetLayout = useCallback(() => {
+    if (!layoutKey) return;
+    localStorage.removeItem(`layout:${layoutKey}`);
+    showToast("Layout reset");
+    runLayout(rf.getNodes(), rf.getEdges());
+    fitView({ padding: 0.2, duration: 250 });
+  }, [layoutKey, runLayout, rf, fitView]);
+
   // Hover spotlight
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
-  // Branch focus (IDs to keep visible; null = show all)
+  // Branch focus (hide unrelated)
   const [focusedIds, setFocusedIds] = useState<Set<string> | null>(null);
+
+  // Status filter (fade, not hide)
+  const [statusFilter, setStatusFilter] = useState<Record<Status, boolean>>({
+    GREEN: true,
+    AMBER: true,
+    RED: true,
+    GRAY: true,
+  });
+  const dimmedIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const n of rawNodes) {
+      const st = n.status as Status | undefined;
+      if (st && !statusFilter[st]) s.add(n.id);
+    }
+    return s;
+  }, [rawNodes, statusFilter]);
 
   // Search
   const [q, setQ] = useState("");
   const [hitIndex, setHitIndex] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // ----- URL params (SSR-safe)
+  // URL params
   const urlParams = useMemo(() => {
     if (typeof window === "undefined") return null;
     return new URLSearchParams(window.location.search);
   }, []);
-
   const initialViewport = useMemo(() => {
     if (!urlParams) return { x: 0, y: 0, zoom: 1 };
     return {
@@ -187,7 +295,6 @@ function RollupFlowInner({
       zoom: Number(urlParams.get("z") ?? 1),
     };
   }, [urlParams]);
-
   const initialSelected = useMemo(
     () => urlParams?.get("sel") ?? null,
     [urlParams]
@@ -195,6 +302,28 @@ function RollupFlowInner({
 
   const proOptions = useMemo(() => ({ hideAttribution: true }), []);
 
+  // Fuzzy
+  function fuzzyScore(query: string, text: string): number {
+    if (!query) return 0;
+    const q = query.toLowerCase().trim();
+    const s = text.toLowerCase();
+    let qi = 0,
+      score = 0,
+      streak = 0;
+    for (let i = 0; i < s.length && qi < q.length; i++) {
+      if (s[i] === q[qi]) {
+        let bonus = 1;
+        if (i === 0 || /\W|_|\s/.test(s[i - 1])) bonus += 3;
+        if (streak > 0) bonus += 2;
+        streak++;
+        qi++;
+        score += bonus;
+      } else streak = 0;
+    }
+    if (qi < q.length) return 0;
+    score += Math.max(0, 4 - (s.length - q.length));
+    return score;
+  }
   const hits = useMemo(() => {
     const s = q.trim();
     if (!s) return [];
@@ -204,17 +333,22 @@ function RollupFlowInner({
         score: fuzzyScore(s, String(n.data?.label || "")),
       }))
       .filter((h) => h.score > 0)
-      .sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        const al = String(a.node.data?.label || "").length;
-        const bl = String(b.node.data?.label || "").length;
-        return al - bl;
-      });
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          String(a.node.data?.label || "").length -
+            String(b.node.data?.label || "").length
+      );
     return scored.map((h) => h.node);
   }, [q, rfNodes]);
 
   const centerOnId = useCallback(
-    (id: string) => fitView({ nodes: [{ id }], padding: 0.25, duration: 250 }),
+    (id: string) =>
+      fitView({
+        nodes: [{ id }],
+        padding: FOCUS_PADDING,
+        duration: FOCUS_DURATION,
+      }),
     [fitView]
   );
 
@@ -236,22 +370,30 @@ function RollupFlowInner({
   }, [hits, hitIndex, centerOnId, writeSelToUrl, onSelect, rawNodes]);
 
   const jumpNext = useCallback(() => {
-    if (!hits.length) return;
-    setHitIndex((i) => (i + 1) % hits.length);
+    if (hits.length) setHitIndex((i) => (i + 1) % hits.length);
   }, [hits.length]);
-
   const jumpPrev = useCallback(() => {
-    if (!hits.length) return;
-    setHitIndex((i) => (i - 1 + hits.length) % hits.length);
+    if (hits.length) setHitIndex((i) => (i - 1 + hits.length) % hits.length);
   }, [hits.length]);
 
-  // Keep latest onGraphChange
+  const clearSelection = useCallback(() => {
+    setRfNodes((nds) => nds.map((n) => ({ ...n, selected: false })));
+    onClear?.();
+    if (typeof window !== "undefined") {
+      const qs = new URLSearchParams(window.location.search);
+      qs.delete("sel");
+      window.history.replaceState(null, "", `?${qs.toString()}`);
+      lastCenteredIdRef.current = null;
+    }
+  }, [onClear, setRfNodes]);
+
+  // onGraphChange ref
   const onGraphChangeRef = useRef(onGraphChange);
   useEffect(() => {
     onGraphChangeRef.current = onGraphChange;
   }, [onGraphChange]);
 
-  // Map raw to RF
+  // Map raw -> RF
   const toRF = useCallback((nodes: RollupNode[], edges: RollupEdge[]) => {
     const mappedNodes: RFNode[] = nodes.map((n) => ({
       id: n.id,
@@ -261,26 +403,27 @@ function RollupFlowInner({
       draggable: n.type !== "group",
       selectable: true,
     }));
-
     const mappedEdges: RFEdge[] = edges.map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
       type: "smoothstep",
       markerEnd: { type: MarkerType.ArrowClosed, width: 18, height: 18 },
-      style: { strokeWidth: 2.5, opacity: 0.9, stroke: "#94a3b8" },
+      style: {
+        strokeWidth: 2.5,
+        opacity: BASE_EDGE_OPACITY,
+        stroke: "#94a3b8",
+      },
       interactionWidth: 24,
     }));
-
     return { rfNodes: mappedNodes, rfEdges: mappedEdges };
   }, []);
 
-  // Fetch once
+  // Fetch once + layout via worker
   const fetchedRef = useRef(false);
   useEffect(() => {
     if (fetchedRef.current) return;
     fetchedRef.current = true;
-
     (async () => {
       try {
         const { nodes, edges } = await getRollup();
@@ -292,12 +435,12 @@ function RollupFlowInner({
           nodes,
           edges
         );
-        const laidOut = layout(mappedNodes, mappedEdges);
-        setRfNodes(laidOut);
+        setRfNodes(mappedNodes);
         setRfEdges(mappedEdges);
 
-        setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 0);
+        await runLayout(mappedNodes, mappedEdges);
 
+        setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 0);
         setTimeout(() => {
           setViewport?.(initialViewport, { duration: 0 });
           if (initialSelected) {
@@ -318,30 +461,59 @@ function RollupFlowInner({
     initialViewport,
     initialSelected,
     onSelect,
+    runLayout,
   ]);
 
-  // Selection + hover spotlight & edge opacity
+  // Apply branch focus (hide unrelated)
+  useEffect(() => {
+    if (!focusedIds) {
+      setRfNodes((nds) => nds.map((n) => ({ ...n, hidden: false })));
+      setRfEdges((eds) => eds.map((e) => ({ ...e, hidden: false })));
+      return;
+    }
+    setRfNodes((nds) =>
+      nds.map((n) => ({ ...n, hidden: !focusedIds.has(n.id) }))
+    );
+    setRfEdges((eds) =>
+      eds.map((e) => ({
+        ...e,
+        hidden: !(focusedIds.has(e.source) && focusedIds.has(e.target)),
+      }))
+    );
+  }, [focusedIds, setRfNodes, setRfEdges]);
+
+  // Selection + fade styling (don’t touch RF's selected flag)
   useEffect(() => {
     const active = selectedId ?? hoveredId;
+
+    setRfNodes((nds) =>
+      nds.map((n) => {
+        const isDim = dimmedIds.has(n.id);
+        return {
+          ...n,
+          style: { ...(n.style || {}), opacity: isDim ? DIM_NODE_OPACITY : 1 },
+        };
+      })
+    );
+
     setRfEdges((eds) =>
       eds.map((e) => {
+        const endpointDim = dimmedIds.has(e.source) || dimmedIds.has(e.target);
+        const base = endpointDim ? DIM_EDGE_OPACITY : BASE_EDGE_OPACITY;
         const isRelated =
           !!active && (e.source === active || e.target === active);
         return {
           ...e,
-          animated: isRelated,
+          animated: isRelated && !e.hidden,
           style: {
             ...(e.style || {}),
-            opacity: active ? (isRelated ? 1 : 0.18) : 0.9,
+            opacity: e.hidden ? 0 : isRelated ? 1 : base,
             stroke: isRelated ? "#93c5fd" : "#94a3b8",
           },
         };
       })
     );
-    setRfNodes((nds) =>
-      nds.map((n) => ({ ...n, selected: n.id === selectedId }))
-    );
-  }, [selectedId, hoveredId, setRfEdges, setRfNodes]);
+  }, [selectedId, hoveredId, dimmedIds, setRfNodes, setRfEdges]);
 
   // Search spotlight
   useEffect(() => {
@@ -358,7 +530,6 @@ function RollupFlowInner({
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || (e as any).isComposing)
         return;
-
       if (
         e.key === "/" ||
         ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k")
@@ -367,7 +538,6 @@ function RollupFlowInner({
         searchRef.current?.focus();
         return;
       }
-
       if (e.key.toLowerCase() === "f") fitView({ padding: 0.2, duration: 200 });
       if (e.key === "+" || e.key === "=") zoomIn?.();
       if (e.key === "-") zoomOut?.();
@@ -388,7 +558,6 @@ function RollupFlowInner({
       } catch {}
     }
   }, [setViewport]);
-
   useOnViewportChange({
     onChange: (vp) => {
       try {
@@ -408,15 +577,44 @@ function RollupFlowInner({
     window.history.replaceState(null, "", `?${qs.toString()}`);
   }, [getViewport]);
 
-  const handleSelectionChange = useCallback((params: { nodes: RFNode[] }) => {
-    if (typeof window === "undefined") return;
-    const qs = new URLSearchParams(window.location.search);
-    if (params.nodes[0]) qs.set("sel", params.nodes[0].id);
-    else qs.delete("sel");
-    window.history.replaceState(null, "", `?${qs.toString()}`);
-  }, []);
+  const handleSelectionChange = useCallback(
+    (params: { nodes: RFNode[] }) => {
+      if (typeof window === "undefined") return;
 
-  // ----- Branch focus helpers
+      // ignore selection updates that come from a drag
+      if (isDraggingRef.current) return;
+
+      const id = params.nodes[0]?.id ?? null;
+
+      // Keep URL in sync
+      const qs = new URLSearchParams(window.location.search);
+      if (id) qs.set("sel", id);
+      else qs.delete("sel");
+      window.history.replaceState(null, "", `?${qs.toString()}`);
+
+      // Open/close the drawer
+      if (id) {
+        const found = rawNodes.find((n) => n.id === id);
+        if (found) onSelect?.(id, found);
+      } else {
+        onClear?.();
+      }
+
+      // Center only when NOT editing
+      if (!editMode && id && lastCenteredIdRef.current !== id) {
+        fitView({
+          nodes: [{ id }],
+          padding: FOCUS_PADDING,
+          duration: FOCUS_DURATION,
+        });
+        lastCenteredIdRef.current = id;
+      }
+      if (!id) lastCenteredIdRef.current = null;
+    },
+    [rawNodes, onSelect, onClear, fitView, editMode]
+  );
+
+  // Focus helpers
   const computeBranchIds = useCallback(
     (centerId: string) => {
       const parentsMap = new Map<string, string[]>();
@@ -427,71 +625,45 @@ function RollupFlowInner({
         childrenMap.get(e.source)!.push(e.target);
         parentsMap.get(e.target)!.push(e.source);
       }
-
       const seen = new Set<string>();
-      const stack = [centerId];
-      // Upward
-      const pushParents = (id: string) => {
-        for (const p of parentsMap.get(id) || [])
+      const up = (id: string) =>
+        (parentsMap.get(id) || []).forEach((p) => {
           if (!seen.has(p)) {
             seen.add(p);
-            pushParents(p);
+            up(p);
           }
-      };
-      // Downward
-      const pushChildren = (id: string) => {
-        for (const c of childrenMap.get(id) || [])
+        });
+      const down = (id: string) =>
+        (childrenMap.get(id) || []).forEach((c) => {
           if (!seen.has(c)) {
             seen.add(c);
-            pushChildren(c);
+            down(c);
           }
-      };
-
+        });
       seen.add(centerId);
-      pushParents(centerId);
-      pushChildren(centerId);
+      up(centerId);
+      down(centerId);
       return seen;
     },
     [rawEdges]
   );
-
   const handleFocusBranch = useCallback(
-    (id: string) => {
-      const setIds = computeBranchIds(id);
-      setFocusedIds(setIds);
-    },
+    (id: string) => setFocusedIds(computeBranchIds(id)),
     [computeBranchIds]
   );
-
   const handleExitFocus = useCallback(() => setFocusedIds(null), []);
 
-  // Apply hidden flags based on focus set
-  useEffect(() => {
-    if (!focusedIds) {
-      setRfNodes((nds) => nds.map((n) => ({ ...n, hidden: false })));
-      setRfEdges((eds) => eds.map((e) => ({ ...e, hidden: false })));
-      return;
-    }
-    setRfNodes((nds) =>
-      nds.map((n) => ({ ...n, hidden: !focusedIds.has(n.id) }))
-    );
-    setRfEdges((eds) =>
-      eds.map((e) => ({
-        ...e,
-        hidden: !(focusedIds.has(e.source) && focusedIds.has(e.target)),
-      }))
-    );
-  }, [focusedIds, setRfNodes, setRfEdges]);
-
   // Drawer handlers
-  const handleCopyLink = useCallback((id: string) => {
-    if (typeof window === "undefined") return;
-    const qs = new URLSearchParams(window.location.search);
-    qs.set("sel", id);
-    const url = `${window.location.pathname}?${qs.toString()}`;
-    navigator.clipboard?.writeText(url).catch(() => {});
-  }, []);
-
+  const handleCopyLink = useCallback(
+    (id: string) => {
+      if (typeof window === "undefined") return;
+      const qs = new URLSearchParams(window.location.search);
+      qs.set("sel", id);
+      const url = `${window.location.pathname}?${qs.toString()}`;
+      navigator.clipboard?.writeText(url).then(() => showToast("Link copied"));
+    },
+    [showToast]
+  );
   const handleJumpTo = useCallback(
     (id: string) => {
       const found = rawNodes.find((n) => n.id === id);
@@ -512,7 +684,7 @@ function RollupFlowInner({
 
   return (
     <div className="relative h-[70vh] rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-800">
-      {/* Search box */}
+      {/* Search + Status Filter row */}
       <div className="pointer-events-auto absolute left-3 top-3 z-50 flex items-center gap-2">
         <input
           ref={searchRef}
@@ -522,9 +694,7 @@ function RollupFlowInner({
             setHitIndex(0);
           }}
           onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.shiftKey ? jumpPrev() : jumpToActive();
-            }
+            if (e.key === "Enter") e.shiftKey ? jumpPrev() : jumpToActive();
             if (e.key === "Escape") {
               setQ("");
               setHitIndex(0);
@@ -543,39 +713,15 @@ function RollupFlowInner({
           placeholder='Find node… ("/" or Ctrl+K)'
           className="h-8 w-56 rounded-md border border-gray-300 bg-white/95 px-2 text-sm shadow-sm outline-none placeholder:text-gray-400 focus:ring-2 focus:ring-blue-400"
         />
-        {q && (
-          <div className="flex items-center gap-1 text-xs text-gray-600">
-            <span className="rounded bg-gray-100 px-1.5 py-0.5">
-              {hits.length ? `${hitIndex + 1}/${hits.length}` : "0/0"}
-            </span>
-            <button
-              onClick={jumpPrev}
-              className="rounded border bg-white px-2 py-0.5 text-xs shadow hover:shadow-md"
-              title="Prev (Shift+Enter / ↑)"
-            >
-              ↑
-            </button>
-            <button
-              onClick={jumpNext}
-              className="rounded border bg-white px-2 py-0.5 text-xs shadow hover:shadow-md"
-              title="Next (Enter / ↓)"
-            >
-              ↓
-            </button>
-            <button
-              onClick={() => {
-                setQ("");
-                setHitIndex(0);
-                setHoveredId(null);
-                searchRef.current?.blur();
-              }}
-              className="rounded border bg-white px-2 py-0.5 text-xs shadow hover:shadow-md"
-              title="Clear (Esc)"
-            >
-              ✕
-            </button>
-          </div>
-        )}
+        <StatusFilter
+          active={statusFilter}
+          onToggle={(s) =>
+            setStatusFilter((prev) => ({ ...prev, [s]: !prev[s] }))
+          }
+          onReset={() =>
+            setStatusFilter({ GREEN: true, AMBER: true, RED: true, GRAY: true })
+          }
+        />
       </div>
 
       {/* Reset View */}
@@ -587,15 +733,53 @@ function RollupFlowInner({
         Reset View
       </button>
 
+      {/* Toast */}
+      {toast && (
+        <div className="pointer-events-none absolute left-1/2 top-4 z-[70] -translate-x-1/2 rounded-md bg-black/80 px-3 py-1 text-xs text-white shadow">
+          {toast}
+        </div>
+      )}
+
+      {/* Layout controls */}
+      <div className="absolute top-3 right-3 z-50 flex items-center gap-2">
+        <button
+          onClick={() => setEditMode((m) => !m)}
+          className={[
+            "rounded-md border px-2 py-1 text-xs shadow hover:shadow-md",
+            editMode ? "bg-yellow-100 border-yellow-300" : "bg-white/90",
+          ].join(" ")}
+          title="Toggle Edit Layout"
+        >
+          {editMode ? "Done editing" : "Edit layout"}
+        </button>
+
+        {editMode && (
+          <>
+            <button
+              onClick={saveLayout}
+              className="rounded-md border bg-white/90 px-2 py-1 text-xs shadow hover:shadow-md"
+              title="Save this layout"
+            >
+              Save
+            </button>
+            <button
+              onClick={resetLayout}
+              className="rounded-md border bg-white/90 px-2 py-1 text-xs shadow hover:shadow-md"
+              title="Reset to auto layout"
+            >
+              Reset
+            </button>
+          </>
+        )}
+      </div>
+
       {/* Insights Drawer */}
       <InsightsDrawer
         node={selectedNode}
         nodes={rawNodes}
         edges={rawEdges}
         isFocused={!!focusedIds}
-        onClose={() => {
-          onClear?.();
-        }}
+        onClose={clearSelection}
         onFocusBranch={handleFocusBranch}
         onExitFocus={handleExitFocus}
         onCopyLink={handleCopyLink}
@@ -605,20 +789,30 @@ function RollupFlowInner({
       <ReactFlow
         onMoveEnd={handleMoveEnd}
         onSelectionChange={handleSelectionChange}
-        nodeTypes={NODE_TYPES}
+        nodeTypes={{ card: CardNode, group: GroupNode }}
         nodes={rfNodes}
         edges={rfEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={(_, node) => {
+          if (editMode) return; // don't open drawer while editing layout
           const found = rawNodes.find((n) => n.id === node.id);
           if (found) {
             onSelect?.(node.id, found);
             const qs = new URLSearchParams(window.location.search);
             qs.set("sel", node.id);
             window.history.replaceState(null, "", `?${qs.toString()}`);
-            fitView({ nodes: [{ id: node.id }], padding: 0.2, duration: 350 });
           }
+        }}
+        onNodeDragStart={() => {
+          isDraggingRef.current = true;
+        }}
+        onNodeDragStop={() => {
+          // brief cooldown so selection-change after drag doesn't open drawer
+          isDraggingRef.current = true;
+          setTimeout(() => {
+            isDraggingRef.current = false;
+          }, 120);
         }}
         onNodeMouseEnter={(_, n) => setHoveredId(n.id)}
         onNodeMouseLeave={() => setHoveredId(null)}
@@ -628,6 +822,7 @@ function RollupFlowInner({
           const qs = new URLSearchParams(window.location.search);
           qs.delete("sel");
           window.history.replaceState(null, "", `?${qs.toString()}`);
+          lastCenteredIdRef.current = null;
         }}
         defaultViewport={{ x: 0, y: 0, zoom: 1 }}
         fitViewOptions={{ padding: 0.2 }}
@@ -641,7 +836,6 @@ function RollupFlowInner({
         panOnScrollMode="free"
         zoomOnScroll={false}
         zoomOnPinch
-        panOnDrag
         selectionOnDrag
         zoomOnDoubleClick={false}
         elevateEdgesOnSelect
@@ -650,6 +844,9 @@ function RollupFlowInner({
         proOptions={proOptions}
         snapToGrid
         snapGrid={[16, 16]}
+        nodesDraggable={editMode}
+        selectNodesOnDrag={!editMode}
+        panOnDrag={!editMode}
       >
         <Background
           variant="dots"
@@ -657,8 +854,42 @@ function RollupFlowInner({
           size={1}
           color="rgba(255, 255, 255, 0.08)"
         />
-        <Controls position="top-right" showInteractive={false} />
+        <Controls position="bottom-right" showInteractive={false} />
       </ReactFlow>
+    </div>
+  );
+}
+
+// ---- Node components (use data/status + fade)
+function CardNode({ data, selected }: any) {
+  const border = statusStroke[data.status as Status] ?? "#9ca3af";
+  return (
+    <div
+      className={[
+        "relative rounded-2xl border-2 bg-white shadow-sm",
+        "px-4 py-3 transition-all cursor-pointer",
+        selected ? "ring-2 ring-blue-400 shadow-lg" : "hover:shadow-md",
+      ].join(" ")}
+      style={{ borderColor: border, opacity: data?.opacity ?? 1 }} // actual opacity set via node.style
+      title={data.label}
+    >
+      <div
+        className="absolute left-0 top-0 h-full w-1.5 rounded-l-2xl"
+        style={{ backgroundColor: border }}
+      />
+      <div className="text-[14px] font-semibold leading-5 text-gray-900">
+        {data.label}
+      </div>
+      <Handle type="target" position={Position.Left} />
+      <Handle type="source" position={Position.Right} />
+      <div className="mt-0.5 text-[12px] text-gray-600">{data.status}</div>
+    </div>
+  );
+}
+function GroupNode({ data }: any) {
+  return (
+    <div className="rounded-2xl border-2 bg-gray-50 px-4 py-3 shadow-inner">
+      <div className="text-[13.5px] font-bold text-gray-800">{data.label}</div>
     </div>
   );
 }

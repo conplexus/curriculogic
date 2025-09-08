@@ -117,9 +117,15 @@ function RollupFlowInner({
 
   // Layout edit mode (locked by default)
   const [editMode, setEditMode] = useState(false);
+  useEffect(() => {
+    if (!editMode) {
+      isDraggingRef.current = false;
+    }
+}, [editMode]);
 
   // Drag tracking (so selection-change doesn’t open drawer)
   const isDraggingRef = useRef(false);
+  const justClickedNodeRef = useRef(false);
 
   // Avoid re-centering same selection repeatedly
   const lastCenteredIdRef = useRef<string | null>(null);
@@ -400,7 +406,7 @@ function RollupFlowInner({
       type: n.type === "group" ? "group" : "card",
       data: { label: n.label, status: n.status, type: n.type },
       position: { x: 0, y: 0 },
-      draggable: n.type !== "group",
+      draggable: n.type === "group" ? false : undefined,
       selectable: true,
     }));
     const mappedEdges: RFEdge[] = edges.map((e) => ({
@@ -581,8 +587,9 @@ function RollupFlowInner({
     (params: { nodes: RFNode[] }) => {
       if (typeof window === "undefined") return;
 
-      // ignore selection updates that come from a drag
-      if (isDraggingRef.current) return;
+      if (editMode && isDraggingRef.current) {
+        return;
+      }
 
       const id = params.nodes[0]?.id ?? null;
 
@@ -794,29 +801,51 @@ function RollupFlowInner({
         edges={rfEdges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
-        onNodeClick={(_, node) => {
-          if (editMode) return; // don't open drawer while editing layout
+        /* LEFT click: select only (no drawer) */
+        onNodeClick={(e, node) => {
+          e.stopPropagation();
+          if (editMode) return; // arranging layout
+          setRfNodes((nds) =>
+            nds.map((n) => ({ ...n, selected: n.id === node.id }))
+          );
+          // Do NOT call onSelect or update ?sel= here, so drawer doesn't open on left click
+        }}
+        /* RIGHT click: open drawer (node menu) */
+        onNodeContextMenu={(e, node) => {
+          e.preventDefault();   // prevent browser context menu
+          e.stopPropagation();
+          if (editMode) return; // don't open while editing layout
+
+          // Visually select the node
+          setRfNodes((nds) =>
+            nds.map((n) => ({ ...n, selected: n.id === node.id }))
+          );
+
+          // Open the drawer
           const found = rawNodes.find((n) => n.id === node.id);
-          if (found) {
-            onSelect?.(node.id, found);
-            const qs = new URLSearchParams(window.location.search);
-            qs.set("sel", node.id);
-            window.history.replaceState(null, "", `?${qs.toString()}`);
-          }
+          if (found) onSelect?.(node.id, found);
+
+          // Sync URL param so deep-links work
+          const qs = new URLSearchParams(window.location.search);
+          qs.set("sel", node.id);
+          window.history.replaceState(null, "", `?${qs.toString()}`);
         }}
         onNodeDragStart={() => {
+          if (!editMode) return;
           isDraggingRef.current = true;
         }}
         onNodeDragStop={() => {
-          // brief cooldown so selection-change after drag doesn't open drawer
+          if (!editMode) return;
           isDraggingRef.current = true;
-          setTimeout(() => {
-            isDraggingRef.current = false;
-          }, 120);
+          setTimeout(() => { isDraggingRef.current = false; }, 120);
         }}
         onNodeMouseEnter={(_, n) => setHoveredId(n.id)}
         onNodeMouseLeave={() => setHoveredId(null)}
         onPaneClick={() => {
+          if (justClickedNodeRef.current) {
+            justClickedNodeRef.current = false;
+            return;
+          }
           setHoveredId(null);
           onClear?.();
           const qs = new URLSearchParams(window.location.search);
@@ -836,7 +865,7 @@ function RollupFlowInner({
         panOnScrollMode="free"
         zoomOnScroll={false}
         zoomOnPinch
-        selectionOnDrag
+        selectionOnDrag={editMode}
         zoomOnDoubleClick={false}
         elevateEdgesOnSelect
         elevateNodesOnSelect
@@ -845,8 +874,11 @@ function RollupFlowInner({
         snapToGrid
         snapGrid={[16, 16]}
         nodesDraggable={editMode}
-        selectNodesOnDrag={!editMode}
+        selectNodesOnDrag={editMode}
         panOnDrag={!editMode}
+        elementsSelectable={true}
+        nodesConnectable={false}
+        nodesFocusable={true}
       >
         <Background
           variant="dots"

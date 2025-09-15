@@ -1,105 +1,215 @@
+/* Tailwind base (v4) */
 @import "tailwindcss";
 
+/* ========================================
+   THEME TOKENS
+   Light + Dark palettes
+======================================== */
+
+/* Light (default) */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0b0f19;
+  --foreground: #e5e7eb;
+  --muted: #0f172a;
+  --muted-foreground: #94a3b8;
+  --border: #1f2937;
+  --ring: #60a5fa;
+  --card: #0f1626;
+  --card-foreground: var(--foreground);
+  --accent: #38bdf8;
+  --accent-fg: #071320;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-md: 0 6px 16px rgba(0,0,0,0.45);
+  --shadow-lg: 0 18px 40px rgba(0,0,0,0.5);
+
+  /* React Flow canvas */
+  --rf-bg-start: #ffffff;
+  --rf-bg-mid: #f7fafc;
+  --rf-bg-end: #eef2f7;
+  --rf-dots: rgba(0, 0, 0, 0.08);
+  --rf-edge: #64748b;
+  --rf-card-border: #0b0f19;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* Dark override */
+:root[data-theme="dark"] {
+  --background: #0b0f19;
+  --foreground: #e5e7eb;
+  --muted: #0f172a;
+  --muted-foreground: #94a3b8;
+  --border: #1f2937;
+  --ring: #60a5fa;
+  --card: #0f1626;
+  --card-foreground: var(--foreground);
+  --accent: #38bdf8;
+  --accent-fg: #071320;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 18px 40px rgba(0, 0, 0, 0.5);
+
+  --rf-bg-start: #0b0f19;
+  --rf-bg-mid: #0f1626;
+  --rf-bg-end: #0b0f19;
+  --rf-dots: rgba(255, 255, 255, 0.08);
+  --rf-edge: #94a3b8;
+  --rf-card-border: #ffffff;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ========================================
+   BASE RESET & TYPOGRAPHY
+======================================== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html, body, #__next {
+  height: 100%;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans, ui-sans-serif, system-ui);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* ----------------------------------------
-   Existing content
----------------------------------------- */
-@import "tailwindcss";
-
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Smooth focus rings */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring), transparent 65%);
+  border-radius: 8px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/* Text selection */
+::selection {
+  background: color-mix(in oklab, var(--accent) 30%, transparent);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Links */
+a {
+  color: var(--accent);
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+a:hover {
+  text-decoration: underline;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* Headings */
+h1, h2, h3 {
+  letter-spacing: -0.01em;
+}
+h1 { font-weight: 700; }
+h2, h3 { font-weight: 600; }
+
+/* Cards & panels */
+.card {
+  background: var(--card);
+  color: var(--card-foreground);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  box-shadow: var(--shadow-sm);
+}
+.card-elevated { box-shadow: var(--shadow-md); }
+
+/* Subtle borders */
+hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 1.25rem 0;
 }
 
-/* ----------------------------------------
-   React Flow readability tweaks
----------------------------------------- */
+/* Scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--foreground), transparent 70%) transparent;
+}
+*::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--foreground), transparent 75%);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--foreground), transparent 65%);
+}
 
-/* Keep edge widths consistent while zooming */
+/* ========================================
+   REACT FLOW POLISH
+======================================== */
+.react-flow__edge path {
+  stroke: var(--rf-edge);
+  stroke-linecap: round;
+}
 .react-flow__edge-path,
 .react-flow__connection-path {
   vector-effect: non-scaling-stroke;
 }
-
-/* Slight shadow behind the minimap for visibility */
-.react-flow__minimap {
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.1));
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.8); /* light mode */
+.react-flow__edge:hover path {
+  filter: drop-shadow(0 0 6px color-mix(in oklab, var(--ring), transparent 70%));
 }
-
-@media (prefers-color-scheme: dark) {
-  .react-flow__minimap {
-    background: rgba(20, 20, 20, 0.8); /* dark mode */
-  }
+.react-flow__edge.selected path {
+  stroke-width: 2.25px;
+  stroke: var(--ring);
 }
-
-/* Optional: make handles (connection points) easier to see */
+.react-flow__node.selected {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring), transparent 55%);
+  border-radius: 14px;
+}
 .react-flow__handle {
-  width: 8px;
-  height: 8px;
-  background-color: #3b82f6; /* Tailwind blue-500 */
-  border: 1px solid white;
+  width: 10px;
+  height: 10px;
+  border: 1px solid color-mix(in oklab, white, transparent 10%);
+  background-color: var(--ring);
 }
 
-/* Keep edge widths consistent while zooming */
-.react-flow__edge-path,
-.react-flow__connection-path {
-  vector-effect: non-scaling-stroke;
-}
-
-/* Controls readable on dark background */
+/* Controls */
 .react-flow__controls {
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: color-mix(in oklab, var(--background), white 12%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-md);
+}
+.react-flow__controls button { color: var(--foreground); }
+.react-flow__controls button:hover {
+  background: color-mix(in oklab, var(--muted), transparent 30%);
+}
+
+/* Minimap */
+.react-flow__minimap {
   border-radius: 10px;
-  backdrop-filter: blur(4px);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.15));
+  background: color-mix(in oklab, var(--background), white 8%);
 }
-.react-flow__controls button {
-  color: #0f172a; /* slate-900 */
+:root[data-theme="dark"] .react-flow__minimap {
+  background: color-mix(in oklab, var(--background), black 20%);
 }
+
+/* ========================================
+   UTILITY ENHANCERS
+======================================== */
+.container-soft {
+  background: radial-gradient(1200px 90px at 50% 0%, color-mix(in oklab, var(--muted), transparent 70%), transparent 70%) no-repeat;
+}
+.section {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
+/* smoother transform when hiding the header */
+header[role="banner"] {
+  will-change: transform, height, background;
+}
+

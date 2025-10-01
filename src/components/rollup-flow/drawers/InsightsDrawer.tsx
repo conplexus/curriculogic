@@ -1,7 +1,45 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { RollupNode, RollupEdge, Status, NodeKind } from "@/lib/types";
-import NodeDataEditor from "./NodeDataEditor";
+import NodeDataEditor from "@/components/rollup-flow/modals/NodeDataEditor";
+
+function useNodeRollup(
+  nodeId: number | null,
+  kind: string | null,
+  cohortId: number | null
+) {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!nodeId || !cohortId) return;
+
+    // Only compute for STANDARD for now (API returns standard-level rollup)
+    if (kind !== "STANDARD") {
+      setData(null);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    // ✅ correct param name: standardNodeId
+    fetch(`/api/rollup?standardNodeId=${nodeId}&cohortId=${cohortId}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(setData)
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [nodeId, kind, cohortId]);
+
+  return { data, loading, error };
+}
+
 
 // InsightsDrawer.tsx (top of file)
 const DRAWER_THEME: "dark" | "light" = "dark"; // change to "light" to test quickly
@@ -41,6 +79,15 @@ const LS_KEY = "insightsDrawer.width";
 
 export default function InsightsDrawer(props: DrawerProps) {
   const { node } = props;
+  const normalizedKind =
+  typeof node?.kind === "string" ? node.kind.toUpperCase().trim() : node?.kind;
+  const cohortId = 1; // TODO: replace with selected cohort once you build selector
+  const { data: rollup, loading: rollupLoading } = useNodeRollup(
+  node?.id ?? null,
+  normalizedKind ?? null,
+  cohortId
+ );
+
   if (!node) return null; // <-- MUST be before any hooks
   const {
     nodes, edges, isFocused,
@@ -152,9 +199,17 @@ export default function InsightsDrawer(props: DrawerProps) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">{node.label}</h2>
+          <div className="text-xs text-zinc-500">
+            kind:{String(node.kind)} id:{String(node.id)}
+          </div>
+            {normalizedKind === "STANDARD" && (
+              <div className="text-xs text-zinc-500">
+                rollup:{JSON.stringify(rollup)} loading:{String(rollupLoading)}
+              </div>
+            )}
           <div className="mt-1 flex items-center gap-2">
             {chip}
-            <span className="text-xs uppercase tracking-wide text-zinc-500">{node.kind}</span>
+            <span className="text-xs uppercase tracking-wide text-zinc-500">{normalizedKind}</span>
           </div>
         </div>
         <button
@@ -233,21 +288,63 @@ export default function InsightsDrawer(props: DrawerProps) {
 
         <Field label="Description" value={node.data?.description ?? "—"} />
 
-        {/* Kind-specific blocks */}
+        {/* STANDARD performance from rollup */}
+        {normalizedKind === "STANDARD" && (
+          <>
+            <Field
+              label="Achievement"
+              value={
+                rollupLoading
+                  ? "…"
+                  : rollup?.achRate == null
+                    ? "—"
+                    : `${Math.round(rollup.achRate * 100)}%`
+              }
+            />
+            <Field
+              label="Target"
+              value={
+                rollupLoading
+                  ? "…"
+                  : rollup?.targetRate == null
+                    ? "—"
+                    : `${Math.round(rollup.targetRate * 100)}%`
+              }
+            />
+            <Field
+              label="Performance (avg)"
+              value={
+                rollupLoading
+                  ? "…"
+                  : rollup?.meanPct == null
+                    ? "—"
+                    : `${Math.round(rollup.meanPct * 100)}%`
+              }
+            />
+            <Field
+              label="Courses Contributing"
+              value={rollupLoading ? "…" : (rollup?.nCourses ?? "—")}
+            />
+          </>
+        )}
+
+        {/* (Optional) keep your old KindFields for other node kinds;
+            just fix the case to uppercase NodeKind strings */}
         <KindFields
-          kind={node.kind}
+          kind={normalizedKind}
           data={{
             performancePct:
-              node.kind === "course" || node.kind === "assessment" || node.kind === "question"
+              normalizedKind === "COURSE" || normalizedKind === "ASSESSMENT" || normalizedKind === "ITEM"
                 ? node.data?.averagePct ?? node.data?.courseAvgPct
                 : undefined,
             achievementPct:
-              node.kind === "objective" || node.kind === "standard"
+              normalizedKind === "OBJECTIVE" || normalizedKind === "STANDARD"
                 ? node.data?.achievementPct ?? node.data?.compliancePct
                 : undefined,
-            weight: node.data?.weight ?? (typeof node.data?.weightPct === "number"
-              ? node.data.weightPct / 100
-              : undefined),
+            weight:
+              typeof node.data?.weightPct === "number"
+                ? node.data.weightPct / 100
+                : node.data?.weight,
           }}
         />
       </section>
@@ -279,7 +376,7 @@ export default function InsightsDrawer(props: DrawerProps) {
       {/* Editor Modal */}
       {isEditing && (
         <NodeDataEditor
-          kind={node.kind}
+          kind={normalizedKind}
           initial={{ ...node.data, label: node.label }}
           onCancel={() => setIsEditing(false)}
           title={`Edit ${node.label}`}
@@ -324,11 +421,11 @@ function KindFields({
   kind: NodeKind;
   data: { performancePct?: number; weight?: number; achievementPct?: number };
 }) {
-  const showPerf = kind === "question" || kind === "assessment" || kind === "course";
-  const showWeight = kind === "question" || kind === "assessment";
-  const showAch = kind === "objective" || kind === "standard";
+  const showPerf = kind === "ITEM" || kind === "ASSESSMENT" || kind === "COURSE";
+  const showWeight = kind === "ITEM" || kind === "ASSESSMENT";
+  const showAch = kind === "OBJECTIVE" || kind === "STANDARD";
 
-  const pct = (n?: number) => (typeof n === "number" ? `${n.toFixed(1)}%` : "—");
+  const pct = (n?: number) => (typeof n === "number" ? `${(n * 100).toFixed(1)}%` : "—");
   const num = (n?: number) => (typeof n === "number" ? n : "—");
 
   return (
@@ -339,4 +436,3 @@ function KindFields({
     </div>
   );
 }
-

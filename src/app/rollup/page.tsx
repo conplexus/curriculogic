@@ -2,7 +2,7 @@
 "use client";
 
 import { useState } from "react";
-import RollupFlow from "@/components/RollupFlow";
+import RollupFlow from "@/components/rollup-flow/RollupFlow";
 
 export default function RollupPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);

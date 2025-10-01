@@ -148,3 +148,19 @@ function clamp01(n: number) {
   if (!Number.isFinite(n)) return undefined as unknown as number;
   return Math.min(1, Math.max(0, n));
 }
+
+export type TargetModel = "threshold_rate" | "mean_score";
+
+export type ObjectiveMetrics = {
+  meanPct: number | null;          // 0..1
+  attainmentRate: number | null;   // 0..1
+  nItems: number;
+  nAssessments: number;
+};
+
+export type StandardMetrics = {
+  modelA_attain: number | null;
+  modelB_mean: number | null;
+  nObjectives: number;
+  nCourses: number;
+};

@@ -2,7 +2,7 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import { ThemeProvider } from "@/components/ThemeProvider";
-import SiteHeader from "@/components/SiteHeader";
+import SiteHeader from "@/components/common/SiteHeader";
 
 export const metadata: Metadata = {
   title: "CurricuLogic",

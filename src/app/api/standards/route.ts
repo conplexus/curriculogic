@@ -63,3 +63,32 @@ export async function POST(req: Request) {
     return noStore({ error: "Failed to create standard" }, 500);
   }
 }
+
+
+import { NextResponse } from "next/server";
+import { computeStandardMean } from "@/lib/rollup/compute";
+import { db } from "@/db/client";
+import { standards } from "@/db/schema";
+import { eq } from "drizzle-orm";
+
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const cohortId = searchParams.get("cohortId");
+  const standardNodeId = searchParams.get("standardNodeId");
+  if (!cohortId || !standardNodeId) {
+    return NextResponse.json({ error: "cohortId and standardNodeId are required" }, { status: 400 });
+  }
+
+  const std = await db.select().from(standards).where(eq(standards.nodeId, standardNodeId)).limit(1);
+  const model = std[0]?.targetModel ?? "threshold_rate";
+  const target = std[0]?.targetValue ?? null;
+
+  const { mean, nCourses } = await computeStandardMean(cohortId, standardNodeId);
+
+  return NextResponse.json({
+    modelSuggested: model,
+    targetValue: target,
+    modelB_mean: mean,    // 0..1 or null
+    nCourses,
+  });
+}

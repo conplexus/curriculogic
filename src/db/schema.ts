@@ -131,6 +131,32 @@ export const edges = pgTable(
   })
 );
 
+export const standardCourseWeights = pgTable(
+  "standard_course_weights",
+  {
+    id: serial("id").primaryKey(),
+    standardNodeId: integer("standard_node_id")
+      .notNull()
+      .references(() => nodes.id, { onDelete: "cascade" }),
+    courseNodeId: integer("course_node_id")
+      .notNull()
+      .references(() => nodes.id, { onDelete: "cascade" }),
+    weightInStandard: numeric("weight_in_standard", { precision: 10, scale: 4 })
+      .default("1")
+      .notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => ({
+    stdCourseUk: uniqueIndex("standard_course_weights_uk").on(
+      t.standardNodeId,
+      t.courseNodeId
+    ),
+    stdIdx: index("standard_course_weights_std_idx").on(t.standardNodeId),
+    courseIdx: index("standard_course_weights_course_idx").on(t.courseNodeId),
+  })
+);
+
+
 // Aggregated performance (FERPA-safe)
 export const aggMetrics = pgTable(
   "agg_metrics",
@@ -210,6 +236,10 @@ export const objectives = pgTable(
     description: text("description"),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    weightInCourse: numeric("weight_in_course", { precision: 10, scale: 4 }).default("1"),
+    proficiencyCut: numeric("proficiency_cut", { precision: 10, scale: 4 }).default("0.7"),
+    targetRate: numeric("target_rate", { precision: 10, scale: 4 }).default("0.8"),
+
   },
   (t) => ({
     courseIdx: index("objectives_course_idx").on(t.courseId),
@@ -329,5 +359,48 @@ export const objectiveStats = pgTable(
     objIdx: index("objective_stats_objective_idx").on(t.objectiveId),
     courseIdx: index("objective_stats_course_idx").on(t.courseId),
     assessIdx: index("objective_stats_assessment_idx").on(t.assessmentId),
+  })
+);
+
+export const questionResults = pgTable(
+  "question_results",
+  {
+    id: serial("id").primaryKey(),
+    cohortId: integer("cohort_id")
+      .notNull()
+      .references(() => cohorts.id, { onDelete: "cascade" }),
+    questionId: integer("question_id")
+      .notNull()
+      .references(() => questions.id, { onDelete: "cascade" }),
+    nAttempted: integer("n_attempted").default(0).notNull(),
+    nCorrect: integer("n_correct"),
+    meanPoints: numeric("mean_points", { precision: 10, scale: 4 }),
+    maxPoints: numeric("max_points", { precision: 10, scale: 4 }),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => ({
+    cohortQUk: uniqueIndex("question_results_cohort_q_uk").on(
+      t.cohortId,
+      t.questionId
+    ),
+    cohortIdx: index("question_results_cohort_idx").on(t.cohortId),
+    qIdx: index("question_results_q_idx").on(t.questionId),
+  })
+);
+
+// -------------------------
+// Cohorts (AY/program/site)
+// -------------------------
+export const cohorts = pgTable(
+  "cohorts",
+  {
+    id: serial("id").primaryKey(),
+    name: text("name").notNull(),     // e.g., "AY 2025-26"
+    program: text("program"),         // e.g., "PharmD"
+    campus: text("campus"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (t) => ({
+    nameIdx: index("cohorts_name_idx").on(t.name),
   })
 );

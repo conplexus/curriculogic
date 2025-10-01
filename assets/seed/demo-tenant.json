@@ -1,0 +1,18 @@
+{
+  "org": { "id": "WNEU-P1", "name": "PharmD - WNEU" },
+  "courses": [
+    { "code": "PHRM-101", "title": "Foundations of Pharmacy", "credits": 2 },
+    { "code": "PHRM-102", "title": "Pharmacology I", "credits": 3 },
+    { "code": "PHRM-201", "title": "Pharmacotherapy I", "credits": 4 }
+  ],
+  "outcomes": [
+    { "id": "OUT-001", "code": "CAPE-1", "desc": "Patient-centered care" },
+    { "id": "OUT-002", "code": "CAPE-2", "desc": "Medication therapy" },
+    { "id": "OUT-003", "code": "CAPE-3", "desc": "Pharmacology knowledge" }
+  ],
+  "mappings": [
+    { "course": "PHRM-101", "outcome": "OUT-001", "strength": 3 },
+    { "course": "PHRM-102", "outcome": "OUT-003", "strength": 2 },
+    { "course": "PHRM-201", "outcome": "OUT-001", "strength": 3 }
+  ]
+}
